@@ -7,50 +7,64 @@
 // 3. pour chaque message est reçu, si il est du sujet `chat_messages`, l'afficher
 //    sur la sortie standard
 
+const path = require('path');
+const fs = require('fs');
+
+
 const MQTT = require('mqtt') // https://github.com/mqttjs/MQTT.js
 const BROKER_URI = 'mqtt://localhost' // le broker auquel on se connecte
-const TOPIC = 'chat/messages'  // le sujet auquel on souscrit
+let TOPIC = 'chat/messages'  // le sujet auquel on souscrit
+const LOGPATH = './logs/' // le chemin vers le dossier logs ou sont stockés les messages
+const FILE_NAME = 'log_file.txt' // nom du fichier ou sont stockés les messages
 
 // crée une connection MQTT à une uri
 // retourne la promesse d'un client
 let client = MQTT.connect(BROKER_URI)
 console.log('connexion à %j ...', BROKER_URI)
-const connexion = new Promise(function (resolve, reject) {
-  console.log('connecté!', BROKER_URI)
-  client.on('connect', resolve())
-})
+
+const connexion = brokerUrl => {
+  return new Promise(function (resolve, reject) {
+    console.log('connecté!', brokerUrl)
+    client.on('connect', resolve())
+  })
+}
 
 // souscrit à un sujet pour un client
 // retourne la promesse que c'est fait
-const subscription = new Promise(function (resolve, reject) {
-  client.subscribe(TOPIC, function (err, granted) {
-    if (err) {
-      reject(err)
-    } else {
-      // le sujet a été souscrit
-      console.log("%j soucrit !", TOPIC)
-      // on a promis de souscrire au sujet
-      resolve(granted)
-    }
+const subscription = (client, topic) => {
+  return new Promise( (resolve, reject) => {
+    client.subscribe(TOPIC, (err, granted) => {
+      if (err) {
+        reject(err)
+      } else {
+        // le sujet a été souscrit
+        console.log("%j soucrit !", topic);
+        TOPIC = topic;
+        // on a promis de souscrire au sujet
+        resolve(granted)
+      }
+    })
   })
-})
+}
 
 // on va stocker les messages en attente de traitement
 const message_pool = []
 
-const reception = new Promise(function (resolve, reject) {
-  // quand un message est reçu
-  client.on('message', (topic, payload) => {
-    // on l'ajoute au pool de messages
-    message_pool.push({
-      topic: topic,
-      payload: payload
+const reception = client => {
+  return new Promise(function (resolve, reject) {
+    // quand un message est reçu
+    client.on('message', (topic, payload) => {
+      // on l'ajoute au pool de messages
+      message_pool.push({
+        topic: topic,
+        payload: payload
+      })
     })
+    console.log("messages écoutés!")
+    // on a promis d'écouter les messages en attente
+    resolve()
   })
-  console.log("messages écoutés!")
-  // on a promis d'écouter les messages en attente
-  resolve()
-})
+}
 
 
 // recoit les messages un par un
@@ -93,22 +107,61 @@ function handle_message(message) {
   return Promise.resolve(message)
 }
 
+// On va vérifier qu'il existe ou créer le fichier contenant les messages du topic
+const log_topic_open =  (topic) =>  {
+  return new Promise((resolve, reject) => {
+    // On donne un nom standard au le fichier
+    let file_name = topic.replace('/', '_').replace('\\', '_').replace('-','_').replace(/[0-9]/g, '').toLocaleLowerCase().replace(/ /g, '_');
+    const handler = LOGPATH + file_name + '.txt';
+    if(!fs.existsSync(handler)) {
+      // On créé la structure du contenu du json
+      fs.writeFile(handler, '', (err) => {
+        if (err) throw err;
+        console.log("Le fichier " + file_name + ".txt est créé!");
+      });
+    }
+    resolve(handler)
+  })
+}
+
+// On va écrire dans le fichier
+const log_topic_write =  (handler, message) => {
+  return new Promise((resolve, reject) => {
+    // On ajoute le contenu du message suivi d'un saut à la ligne
+    fs.appendFile(handler, (message.payload.toString() + '\n'), err => {
+      if (err) throw err;
+      console.log('Le message a bien été enregistré!');
+      resolve();
+    })
+  })
+}
+
 // c'est parti !
 // lancement du programme
 // on va gérer chaque message l'un à la suite de l'autre (en séquence)
-connexion             // on se connecte
-  .then(subscription) // on souscrit au topic
-  .then(reception)    // on attend les messages
-  .then(async () => { // on traite
-    //  ^^^^^ il y a un await dans la fonction
-    console.log("en attente ...")
+const start = async function(client, brokerUrl, topic) {
+  await connexion(brokerUrl);
+  await subscription(client, topic);
+  await reception(client);
+  const listen = async() => {
+    console.log("en attente ...");
     for await (let message of incomings()) {
-      // ^^^^ for await: "incomings" est asynchrone!
       // on a recu un message
       if (message) {
         // le message correspond à un sujet souscrit
         // on attend que le message soit traité
-        await handle_message(message)
+        await handle_message(message);
+        // On créé puis récupère le chemin vers le fichier contenant les messages du sujet
+        let handler = await log_topic_open(topic);
+        await log_topic_write(handler, message);
       }
     }
-  })
+  };
+  listen();
+};
+
+
+
+
+
+start(client, BROKER_URI, TOPIC);
